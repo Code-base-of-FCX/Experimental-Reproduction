@@ -1,0 +1,199 @@
+#一、环境配置
+# 创建虚拟环境
+conda create -n timeflow python=3.9
+conda activate timeflow
+
+# 安装核心依赖
+pip install numpy scipy pandas scikit-learn torch matplotlib seaborn
+pip install xarray cfgrib cdsapi  # 气象数据处理
+#二、金融领域完整代码
+#1. 数据下载与预处理
+import pandas as pd
+import yfinance as yf
+from sklearn.preprocessing import StandardScaler
+
+# 下载标普500、美债、原油数据
+def download_finance_data():
+    sp500 = yf.download('^GSPC', start='2010-01-01', end='2023-12-31')['Adj Close']
+    bond = yf.download('^TNX', start='2010-01-01', end='2023-12-31')['Adj Close']
+    oil = yf.download('CL=F', start='2010-01-01', end='2023-12-31')['Adj Close']
+    df = pd.DataFrame({'SP500': sp500, 'Bond': bond, 'Oil': oil}).dropna()
+    return df
+
+# 数据标准化与窗口划分
+def preprocess_data(df, window=60):
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(df)
+    
+    X, y = [], []
+    for i in range(len(scaled)-window):
+        X.append(scaled[i:i+window])
+        y.append(scaled[i+window])
+    return np.array(X), np.array(y), scaler
+
+# 主流程
+df = download_finance_data()
+X, y, scaler = preprocess_data(df)
+2. T-Matrix模型实现
+import torch
+import numpy as np
+from scipy.linalg import expm
+
+class TMatrixModel:
+    def __init__(self, n_vars=3):
+        self.M = np.random.randn(n_vars, n_vars) * 0.1  # 初始化交互矩阵
+        self.W0 = np.ones(n_vars) / n_vars  # 均匀初始权重
+        
+    def predict(self, t):
+        return self.W0 @ expm(self.M * t)
+    
+    def fit(self, X, y, epochs=100, lr=0.01):
+        optimizer = torch.optim.Adam([torch.tensor(self.M, requires_grad=True)], lr=lr)
+        
+        for epoch in range(epochs):
+            total_loss = 0
+            for i in range(len(X)):
+                W_t = self.predict(1)  # 预测下一天
+                y_pred = X[i][-1] @ W_t  # 最后一天数据加权
+                loss = ((y_pred - y[i])**2).mean()
+                
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+            print(f"Epoch {epoch+1}, Loss: {total_loss/len(X):.4f}")
+
+# 训练与预测
+model = TMatrixModel()
+model.fit(X, y)
+predictions = [model.predict(1) for _ in range(len(X))]
+#3. LSTM对比模型
+import torch.nn as nn
+
+class LSTMModel(nn.Module):
+    def __init__(self, input_size=3, hidden_size=128):
+        super().__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2, dropout=0.2)
+        self.fc = nn.Linear(hidden_size, input_size)
+        
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        return self.fc(out[-1])
+
+# 训练循环
+lstm_model = LSTMModel()
+criterion = nn.MSELoss()
+optimizer = torch.optim.Adam(lstm_model.parameters(), lr=0.001)
+
+for epoch in range(200):
+    for seq, target in zip(X, y):
+        seq = torch.tensor(seq, dtype=torch.float32)
+        pred = lstm_model(seq.unsqueeze(1))
+        loss = criterion(pred, torch.tensor(target))
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+#三、医疗领域完整代码
+#1. 数据加载与预处理
+from sklearn.impute import KNNImputer
+from ucimlrepo import fetch_ucirepo 
+
+# 获取糖尿病数据集
+diabetes = fetch_ucirepo(id=296) 
+df = diabetes.data.features
+df['readmitted'] = diabetes.data.targets
+
+# 关键特征处理
+features = ['glucose_test', 'blood_pressure', 'serum_creatinine']
+df = df[features + ['readmitted']].dropna()
+
+# 数据标准化
+imputer = KNNImputer(n_neighbors=5)
+scaled = imputer.fit_transform(df[features])
+#2. 动态权重追踪实现
+class MedicalTimeFlow:
+    def __init__(self, n_features=3):
+        self.M = np.random.randn(n_features, n_features) * 0.1
+        self.W0 = np.ones(n_features) / n_features
+        
+    def update_weights(self, patient_data, t=3):  # t为时间间隔（月）
+        # 计算三个月的变化率
+        delta = (patient_data[-1] - patient_data[0]) / np.linalg.norm(patient_data[0])
+        self.M += 0.1 * np.outer(delta, delta)  # 外积更新交互矩阵
+        return self.W0 @ expm(self.M * t)
+    
+# 使用示例
+mtf = MedicalTimeFlow()
+for i in range(0, len(scaled)-3, 3):
+    window_data = scaled[i:i+3]
+    current_weights = mtf.update_weights(window_data)
+#四、气象领域完整代码
+#1. ERA5数据下载（需CDS API Key）
+import cdsapi
+
+c = cdsapi.Client()
+
+def download_era5():
+    c.retrieve('reanalysis-era5-single-levels', {
+        'product_type': 'reanalysis',
+        'variable': ['2m_temperature', 'mean_sea_level_pressure', '10m_wind_speed'],
+        'year': '2023',
+        'month': '07',
+        'day': list(range(1,32)),
+        'time': ['00:00', '06:00', '12:00', '18:00'],
+        'format': 'netcdf'
+    }, 'era5_july_2023.nc')
+#2. 气象模型实现
+import xarray as xr
+
+def process_weather_data():
+    ds = xr.open_dataset('era5_july_2023.nc')
+    temp = ds['t2m'] - 273.15  # 转换为摄氏度
+    pressure = ds['msl'] / 100  # 转换为hPa
+    wind = ds['si10']
+    
+    # 计算梯度特征
+    grad_lon = temp.differentiate('longitude')
+    grad_lat = temp.differentiate('latitude')
+    return grad_lon, grad_lat, pressure, wind
+
+class WeatherTimeFlow:
+    def __init__(self, grid_size=10):  # 10x10网格
+        self.M = np.random.randn(grid_size, grid_size) * 0.1
+        
+    def predict(self, init_cond, t=6):  # t为小时数
+        return init_cond @ expm(self.M * t/24)
+#五、实验结果复现验证
+#1. 金融领域结果验证
+# 反标准化预测结果
+pred_denorm = scaler.inverse_transform(predictions)
+true_denorm = scaler.inverse_transform(y)
+
+# 计算RMSE
+rmse = np.sqrt(np.mean((pred_denorm - true_denorm)**2, axis=0))
+print(f"RMSE (SP500): {rmse[0]:.4f}, Bond: {rmse[1]:.4f}, Oil: {rmse[2]:.4f}")
+
+# 可视化
+import matplotlib.pyplot as plt
+plt.plot(df.index[-len(pred_denorm):], pred_denorm[:,0], label='Predicted')
+plt.plot(df.index[-len(true_denorm):], true_denorm[:,0], label='True')
+plt.title("SP500 Prediction Comparison")
+plt.legend()
+plt.show()
+#2. 参数敏感性测试
+# 测试不同初始M的影响
+for init_scale in [0.05, 0.1, 0.2]:
+    model.M = np.random.randn(3,3) * init_scale
+    model.fit(X, y)
+    # 记录最终loss...
+#六、关键注意事项
+#金融数据时效性：需更新download_finance_data()中的日期范围获取最新数据
+
+#医疗数据隐私：UCI数据集已匿名化处理，实际应用需符合HIPAA等规范
+
+#气象数据存储：ERA5单月数据约20GB，确保磁盘空间充足
+
+#GPU加速：将PyTorch代码中tensor移至GPU：
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+seq = seq.to(device)
